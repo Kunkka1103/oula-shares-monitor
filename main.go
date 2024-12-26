@@ -96,9 +96,9 @@ func CheckAndUpdate() {
 func checkEpochChanges(chainName string, sourceDB *sql.DB, lastMaxEpoch *int64) error {
 	// 1. 查询 sourceDB 中的最新 epoch
 	var newMaxEpoch sql.NullInt64
-	err := sourceDB.QueryRow("SELECT MAX(epoch) FROM shares").Scan(&newMaxEpoch)
+	err := sourceDB.QueryRow("SELECT MAX(epoch_number) FROM shares").Scan(&newMaxEpoch)
 	if err != nil {
-		return fmt.Errorf("failed to query MAX(epoch): %w", err)
+		return fmt.Errorf("failed to query MAX(epoch_number): %w", err)
 	}
 	if !newMaxEpoch.Valid {
 		// 数据库里还没有任何 epoch，跳过
@@ -133,11 +133,11 @@ func checkEpochChanges(chainName string, sourceDB *sql.DB, lastMaxEpoch *int64) 
 func insertEpochRangeToOps(chainName string, sourceDB, opsDB *sql.DB, startEpoch, endEpoch int64) error {
 	// 查询 sourceDB
 	query := `
-        SELECT epoch, COUNT(*) AS share_count
+        SELECT epoch_number, COUNT(*) AS share_count
         FROM shares
-        WHERE epoch BETWEEN $1 AND $2
-        GROUP BY epoch
-        ORDER BY epoch;
+        WHERE epoch_number BETWEEN $1 AND $2
+        GROUP BY epoch_number
+        ORDER BY epoch_number;
     `
 	rows, err := sourceDB.Query(query, startEpoch, endEpoch)
 	if err != nil {
