@@ -35,19 +35,19 @@ func main() {
 
 	// 初始化数据库连接
 	var err error
-	quaiDB, err := InitDB(*QuaiDSN, "postgres")
+	quaiDB, err = InitDB(*QuaiDSN, "postgres")
 	if err != nil {
 		log.Panicf("init QuaiDSN failed,Error: %v", err)
 	}
 	defer quaiDB.Close()
 
-	aleoDB, err := InitDB(*AleoDSN, "postgres")
+	aleoDB, err = InitDB(*AleoDSN, "postgres")
 	if err != nil {
 		log.Panicf("init AleoDSN failed,Error: %v", err)
 	}
 	defer aleoDB.Close()
 
-	opsDB, err := InitDB(*OpsDSN, "mysql")
+	opsDB, err = InitDB(*OpsDSN, "mysql")
 	if err != nil {
 		log.Panicf("init OpsDSN failed,Error: %v", err)
 	}
