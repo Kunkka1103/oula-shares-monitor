@@ -83,69 +83,71 @@ func InitDB(DSN string, DBType string) (*sql.DB, error) {
 func CheckAndUpdate() {
 	log.Println("CheckAndUpdate triggered.")
 
-	if err := checkEpochChanges("quai", quaiDB, &lastMaxEpochQuai); err != nil {
+	// Quai: 表名 shares
+	if err := checkEpochChanges("quai", "shares", quaiDB, &lastMaxEpochQuai); err != nil {
 		log.Printf("checkEpochChanges failed for Quai: %v\n", err)
 	}
 
-	if err := checkEpochChanges("aleo", aleoDB, &lastMaxEpochAleo); err != nil {
+	// Aleo: 表名 user_shares
+	if err := checkEpochChanges("aleo", "user_shares", aleoDB, &lastMaxEpochAleo); err != nil {
 		log.Printf("checkEpochChanges failed for Aleo: %v\n", err)
 	}
 }
 
+
 // checkEpochChanges 查询 sourceDB 中的最新 epoch，若大于本地记录，则插入区间内的 epoch 信息到 opsDB。
-func checkEpochChanges(chainName string, sourceDB *sql.DB, lastMaxEpoch *int64) error {
-	// 1. 查询 sourceDB 中的最新 epoch
+func checkEpochChanges(chainName, tableName string, sourceDB *sql.DB, lastMaxEpoch *int64) error {
+	// 1. 动态拼 SQL，把 tableName 带进来
+	query := fmt.Sprintf("SELECT MAX(epoch_number) FROM %s", tableName)
+
 	var newMaxEpoch sql.NullInt64
-	err := sourceDB.QueryRow("SELECT MAX(epoch_number) FROM shares").Scan(&newMaxEpoch)
+	err := sourceDB.QueryRow(query).Scan(&newMaxEpoch)
 	if err != nil {
 		return fmt.Errorf("failed to query MAX(epoch_number): %w", err)
 	}
 	if !newMaxEpoch.Valid {
-		// 数据库里还没有任何 epoch，跳过
-		log.Printf("[%s] No epoch found in sourceDB.\n", chainName)
+		log.Printf("[%s] No epoch found in table %s.\n", chainName, tableName)
 		return nil
 	}
 
 	if newMaxEpoch.Int64 <= *lastMaxEpoch {
-		// 没有新的 epoch
 		log.Printf("[%s] No new epoch. lastMaxEpoch=%d, newMaxEpoch=%d\n",
 			chainName, *lastMaxEpoch, newMaxEpoch.Int64)
 		return nil
 	}
 
-	// 2. 将区间 (lastMaxEpoch+1, newMaxEpoch-1) 的 epoch 数据写入 Ops
+	// 2.插入区间...
 	start := *lastMaxEpoch + 1
 	end := newMaxEpoch.Int64 - 1
 	if start <= end {
-		if err := insertEpochRangeToOps(chainName, sourceDB, opsDB, start, end); err != nil {
+		if err := insertEpochRangeToOps(chainName, tableName, sourceDB, opsDB, start, end); err != nil {
 			return fmt.Errorf("failed to insert epoch range [%d,%d] for %s: %w", start, end, chainName, err)
 		}
 	}
 
-	// 3. 更新 lastMaxEpoch
 	*lastMaxEpoch = newMaxEpoch.Int64
 	log.Printf("[%s] Updated lastMaxEpoch to %d\n", chainName, *lastMaxEpoch)
 	return nil
 }
 
+
 // insertEpochRangeToOps 从 sourceDB 中查询指定区间 [startEpoch, endEpoch] 的 epoch 及其 count
 // 然后插入到 opsDB 的 shares_epoch_counts (或你自定义的) 表中。
-func insertEpochRangeToOps(chainName string, sourceDB, opsDB *sql.DB, startEpoch, endEpoch int64) error {
-	// 查询 sourceDB
-	query := `
+func insertEpochRangeToOps(chainName, tableName string, sourceDB, opsDB *sql.DB, startEpoch, endEpoch int64) error {
+	query := fmt.Sprintf(`
         SELECT epoch_number, COUNT(*) AS share_count
-        FROM shares
+        FROM %s
         WHERE epoch_number BETWEEN $1 AND $2
         GROUP BY epoch_number
         ORDER BY epoch_number;
-    `
+    `, tableName)
+
 	rows, err := sourceDB.Query(query, startEpoch, endEpoch)
 	if err != nil {
 		return fmt.Errorf("sourceDB.Query failed: %w", err)
 	}
 	defer rows.Close()
 
-	// 准备往 Ops 写入
 	insertSQL := `
         INSERT INTO shares_epoch_counts (chain, epoch, share_count, created_at)
         VALUES (?, ?, ?, NOW());
@@ -154,6 +156,12 @@ func insertEpochRangeToOps(chainName string, sourceDB, opsDB *sql.DB, startEpoch
 	if err != nil {
 		return fmt.Errorf("opsDB.Begin failed: %w", err)
 	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+	}()
 
 	stmt, err := tx.Prepare(insertSQL)
 	if err != nil {
@@ -189,3 +197,4 @@ func insertEpochRangeToOps(chainName string, sourceDB, opsDB *sql.DB, startEpoch
 		chainName, countRecords, startEpoch, endEpoch)
 	return nil
 }
+
