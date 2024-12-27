@@ -12,52 +12,59 @@ import (
 )
 
 var (
-	QuaiDSN = flag.String("quaiDSN", "", "Quai DSN, e.g. postgres://user:password@host:5432/quai")
-	AleoDSN = flag.String("aleoDSN", "", "Aleo DSN, e.g. postgres://user:password@host:5432/aleo")
-	OpsDSN  = flag.String("opsDSN", "", "Ops DSN, e.g. user:password@tcp(host:3306)/ops_db")
-	interval = flag.Int("interval", 10, "Check interval in minutes")
+	// 命令行参数
+	quaiDSN    = flag.String("quaiDSN", "", "Quai DSN, e.g. postgres://user:password@host:5432/quai")
+	aleoDSN    = flag.String("aleoDSN", "", "Aleo DSN, e.g. postgres://user:password@host:5432/aleo")
+	opsDSN     = flag.String("opsDSN", "", "Ops DSN, e.g. user:password@tcp(host:3306)/ops_db")
+	checkMins  = flag.Int("interval", 10, "Check interval in minutes")
 
-	//// 数据库连接
+	// 数据库连接（全局）
 	quaiDB *sql.DB
 	aleoDB *sql.DB
 	opsDB  *sql.DB
 
-	// 记录上一次检查到的最大 epoch（内存变量示例，可持久化到文件/数据库）
+	// 记录上一次处理的最大 epoch
 	lastMaxEpochQuai int64
 	lastMaxEpochAleo int64
 )
 
 func main() {
 	flag.Parse()
-	if *QuaiDSN == "" || *AleoDSN == "" || *OpsDSN == "" {
+	if *quaiDSN == "" || *aleoDSN == "" || *opsDSN == "" {
 		log.Panicln("All DSN parameters (quaiDSN, aleoDSN, opsDSN) are required.")
 	}
 
-	// 初始化数据库连接
+	// 1. 初始化数据库连接
 	var err error
-	quaiDB, err = InitDB(*QuaiDSN, "postgres")
+	quaiDB, err = initDB(*quaiDSN, "postgres")
 	if err != nil {
-		log.Panicf("init QuaiDSN failed,Error: %v", err)
+		log.Panicf("Failed to init QuaiDB: %v", err)
 	}
 	defer quaiDB.Close()
 
-	aleoDB, err = InitDB(*AleoDSN, "postgres")
+	aleoDB, err = initDB(*aleoDSN, "postgres")
 	if err != nil {
-		log.Panicf("init AleoDSN failed,Error: %v", err)
+		log.Panicf("Failed to init AleoDB: %v", err)
 	}
 	defer aleoDB.Close()
 
-	opsDB, err = InitDB(*OpsDSN, "mysql")
+	opsDB, err = initDB(*opsDSN, "mysql")
 	if err != nil {
-		log.Panicf("init OpsDSN failed,Error: %v", err)
+		log.Panicf("Failed to init OpsDB: %v", err)
 	}
 	defer opsDB.Close()
 
-	// 使用用户指定的 interval 作为 Ticker 周期
-	ticker := time.NewTicker(time.Duration(*interval) * time.Minute)
+	// 2. 程序启动时，从 shares_epoch_counts 中获取这两个链的最新进度
+	lastMaxEpochQuai = loadLastEpochFromTable(opsDB, "quai")
+	lastMaxEpochAleo = loadLastEpochFromTable(opsDB, "aleo")
+	log.Printf("Startup - lastMaxEpochQuai=%d, lastMaxEpochAleo=%d\n",
+		lastMaxEpochQuai, lastMaxEpochAleo)
+
+	// 3. 定时器
+	ticker := time.NewTicker(time.Duration(*checkMins) * time.Minute)
 	defer ticker.Stop()
 
-	log.Printf("Starting check loop with interval = %d minute(s)\n", *interval)
+	log.Printf("Starting check loop with interval = %d minute(s)\n", *checkMins)
 	for {
 		select {
 		case <-ticker.C:
@@ -66,80 +73,101 @@ func main() {
 	}
 }
 
-// InitDB 初始化数据库连接
-func InitDB(DSN string, DBType string) (*sql.DB, error) {
-	db, err := sql.Open(DBType, DSN)
+// initDB 初始化数据库连接并测试连通性
+func initDB(dsn, dbType string) (*sql.DB, error) {
+	db, err := sql.Open(dbType, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sql.Open failed: %w", err)
 	}
 	// 测试连接
 	if err = db.Ping(); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("db.Ping failed: %w", err)
 	}
 	return db, nil
 }
 
-// CheckAndUpdate 主逻辑：定期检查 Quai 和 Aleo DB 的 shares 表，插入新 epoch 数据到 Ops DB
-func CheckAndUpdate() {
-	log.Println("CheckAndUpdate triggered.")
+// loadLastEpochFromTable 从 MySQL 的 shares_epoch_counts 表中，查找某个 chain 已有的最大 epoch
+func loadLastEpochFromTable(db *sql.DB, chain string) int64 {
+	var epoch sql.NullInt64
+	err := db.QueryRow(`
+        SELECT MAX(epoch) 
+        FROM shares_epoch_counts
+        WHERE chain = ?
+    `, chain).Scan(&epoch)
+	if err != nil {
+		log.Printf("Failed to load last epoch for chain=%s: %v\n", chain, err)
+		return 0
+	}
+	if epoch.Valid {
+		return epoch.Int64
+	}
+	return 0
+}
 
-	// Quai: 表名 shares
+// CheckAndUpdate 同时检查 QuaiDB 和 AleoDB
+func CheckAndUpdate() {
+	// Quai: 表名是 shares
 	if err := checkEpochChanges("quai", "shares", quaiDB, &lastMaxEpochQuai); err != nil {
-		log.Printf("checkEpochChanges failed for Quai: %v\n", err)
+		log.Printf("checkEpochChanges(quai) error: %v\n", err)
 	}
 
-	// Aleo: 表名 user_shares
+	// Aleo: 表名是 user_shares
 	if err := checkEpochChanges("aleo", "user_shares", aleoDB, &lastMaxEpochAleo); err != nil {
-		log.Printf("checkEpochChanges failed for Aleo: %v\n", err)
+		log.Printf("checkEpochChanges(aleo) error: %v\n", err)
 	}
 }
 
-
-// checkEpochChanges 查询 sourceDB 中的最新 epoch，若大于本地记录，则插入区间内的 epoch 信息到 opsDB。
+// checkEpochChanges(方案B)：只写 [lastMaxEpoch+1, newMaxEpoch-1]
 func checkEpochChanges(chainName, tableName string, sourceDB *sql.DB, lastMaxEpoch *int64) error {
-	// 1. 动态拼 SQL，把 tableName 带进来
-	query := fmt.Sprintf("SELECT MAX(epoch_number) FROM %s", tableName)
-
+	// 1. 查询源数据库中最新 epoch_number
 	var newMaxEpoch sql.NullInt64
-	err := sourceDB.QueryRow(query).Scan(&newMaxEpoch)
-	if err != nil {
-		return fmt.Errorf("failed to query MAX(epoch_number): %w", err)
+	query := fmt.Sprintf("SELECT MAX(epoch_number) FROM %s", tableName)
+	if err := sourceDB.QueryRow(query).Scan(&newMaxEpoch); err != nil {
+		return fmt.Errorf("queryRow failed: %w", err)
 	}
 	if !newMaxEpoch.Valid {
-		log.Printf("[%s] No epoch found in table %s.\n", chainName, tableName)
+		log.Printf("[%s] No epoch found in %s\n", chainName, tableName)
 		return nil
 	}
+	curMax := newMaxEpoch.Int64
 
-	if newMaxEpoch.Int64 <= *lastMaxEpoch {
+	// 如果当前最大 epoch <= lastMaxEpoch，说明无新 epoch
+	if curMax <= *lastMaxEpoch {
 		log.Printf("[%s] No new epoch. lastMaxEpoch=%d, newMaxEpoch=%d\n",
-			chainName, *lastMaxEpoch, newMaxEpoch.Int64)
+			chainName, *lastMaxEpoch, curMax)
 		return nil
 	}
 
-	// 2.插入区间...
+	// 2. 写入区间 [lastMaxEpoch+1, curMax-1]
 	start := *lastMaxEpoch + 1
-	end := newMaxEpoch.Int64 - 1
+	end := curMax - 1
+
 	if start <= end {
-		if err := insertEpochRangeToOps(chainName, tableName, sourceDB, opsDB, start, end); err != nil {
-			return fmt.Errorf("failed to insert epoch range [%d,%d] for %s: %w", start, end, chainName, err)
+		if err := insertEpochRange(chainName, tableName, sourceDB, opsDB, start, end); err != nil {
+			return fmt.Errorf("insertEpochRange [%d, %d] error: %w", start, end, err)
 		}
+		// 写完后，把 lastMaxEpoch 更新到 end
+		*lastMaxEpoch = end
+		log.Printf("[%s] Updated lastMaxEpoch to %d\n", chainName, *lastMaxEpoch)
+	} else {
+		// 如果 start > end，说明 just +1
+		log.Printf("[%s] Possibly only one new epoch? lastMaxEpoch=%d, newMaxEpoch=%d\n",
+			chainName, *lastMaxEpoch, curMax)
 	}
 
-	*lastMaxEpoch = newMaxEpoch.Int64
-	log.Printf("[%s] Updated lastMaxEpoch to %d\n", chainName, *lastMaxEpoch)
 	return nil
 }
 
-
-// insertEpochRangeToOps 从 sourceDB 中查询指定区间 [startEpoch, endEpoch] 的 epoch 及其 count
-// 然后插入到 opsDB 的 shares_epoch_counts (或你自定义的) 表中。
-func insertEpochRangeToOps(chainName, tableName string, sourceDB, opsDB *sql.DB, startEpoch, endEpoch int64) error {
+// insertEpochRange 将 [startEpoch, endEpoch] 区间的 epoch_number & share_count 插入到 MySQL
+func insertEpochRange(chainName, tableName string, sourceDB, opsDB *sql.DB, startEpoch, endEpoch int64) error {
+	// 1. 在源库查询
 	query := fmt.Sprintf(`
         SELECT epoch_number, COUNT(*) AS share_count
         FROM %s
         WHERE epoch_number BETWEEN $1 AND $2
         GROUP BY epoch_number
-        ORDER BY epoch_number;
+        ORDER BY epoch_number
     `, tableName)
 
 	rows, err := sourceDB.Query(query, startEpoch, endEpoch)
@@ -148,10 +176,13 @@ func insertEpochRangeToOps(chainName, tableName string, sourceDB, opsDB *sql.DB,
 	}
 	defer rows.Close()
 
+	// 2. 写 MySQL
+	// 确保 shares_epoch_counts 上有 UNIQUE KEY (chain, epoch)
 	insertSQL := `
-        INSERT INTO shares_epoch_counts (chain, epoch, share_count, created_at)
-        VALUES (?, ?, ?, NOW());
+        INSERT IGNORE INTO shares_epoch_counts (chain, epoch, share_count, created_at)
+        VALUES (?, ?, ?, NOW())
     `
+
 	tx, err := opsDB.Begin()
 	if err != nil {
 		return fmt.Errorf("opsDB.Begin failed: %w", err)
@@ -172,13 +203,13 @@ func insertEpochRangeToOps(chainName, tableName string, sourceDB, opsDB *sql.DB,
 
 	countRecords := 0
 	for rows.Next() {
-		var epochVal, shareCount int64
-		if err := rows.Scan(&epochVal, &shareCount); err != nil {
+		var epochNumber, shareCount int64
+		if err := rows.Scan(&epochNumber, &shareCount); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("rows.Scan failed: %w", err)
 		}
 
-		if _, err = stmt.Exec(chainName, epochVal, shareCount); err != nil {
+		if _, err = stmt.Exec(chainName, epochNumber, shareCount); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("stmt.Exec failed: %w", err)
 		}
@@ -193,8 +224,7 @@ func insertEpochRangeToOps(chainName, tableName string, sourceDB, opsDB *sql.DB,
 		return fmt.Errorf("tx.Commit failed: %w", err)
 	}
 
-	log.Printf("[%s] Inserted %d epochs into Ops DB, range [%d,%d]\n",
+	log.Printf("[%s] Inserted %d record(s) into shares_epoch_counts, range=[%d,%d]\n",
 		chainName, countRecords, startEpoch, endEpoch)
 	return nil
 }
-
