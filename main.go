@@ -164,7 +164,7 @@ func insertEpochRange(chainName, tableName string, sourceDB, opsDB *sql.DB, star
 	// 1. 在源库查询
 	query := fmt.Sprintf(`
         WITH epochs AS (
-    	SELECT generate_series($1, $2) AS e  -- 生成从 startEpoch 到 endEpoch 的所有整数
+    	SELECT generate_series($1::integer, $2:integer) AS e  -- 生成从 startEpoch 到 endEpoch 的所有整数
 		)	
 		SELECT e AS epoch_number,
         COALESCE(t.cnt, 0) AS share_count
