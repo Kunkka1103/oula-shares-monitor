@@ -163,12 +163,21 @@ func checkEpochChanges(chainName, tableName string, sourceDB *sql.DB, lastMaxEpo
 func insertEpochRange(chainName, tableName string, sourceDB, opsDB *sql.DB, startEpoch, endEpoch int64) error {
 	// 1. 在源库查询
 	query := fmt.Sprintf(`
-        SELECT epoch_number, COUNT(*) AS share_count
-        FROM %s
-        WHERE epoch_number BETWEEN $1 AND $2
-        GROUP BY epoch_number
-        ORDER BY epoch_number
-    `, tableName)
+        WITH epochs AS (
+    	SELECT generate_series($1, $2) AS e  -- 生成从 startEpoch 到 endEpoch 的所有整数
+		)	
+		SELECT e AS epoch_number,
+        COALESCE(t.cnt, 0) AS share_count
+		FROM epochs
+		LEFT JOIN (
+    	SELECT epoch_number, COUNT(*) AS cnt
+    	FROM %s
+    	WHERE epoch_number BETWEEN $1 AND $2
+    	GROUP BY epoch_number
+		) AS t
+  		ON epochs.e = t.epoch_number
+		ORDER BY e;
+		`, tableName)
 
 	rows, err := sourceDB.Query(query, startEpoch, endEpoch)
 	if err != nil {
